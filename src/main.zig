@@ -1,45 +1,33 @@
 const std = @import("std");
 
-pub fn main() anyerror!void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
+    const cwd = std.Io.Dir.cwd();
 
-    var source_files = try std.fs.cwd().openDir("people", .{ .iterate = true });
-    defer source_files.close();
+    var source_files = try cwd.openDir(io, "people", .{ .iterate = true });
+    defer source_files.close(io);
 
-    var string_buffer = std.ArrayList(u8).init(&gpa.allocator);
-    defer string_buffer.deinit();
-
-    var writer = string_buffer.writer();
-
+    var buffer: std.Io.Writer.Allocating = .init(allocator);
+    defer buffer.deinit();
+    const writer = &buffer.writer;
     try writer.writeAll("[");
 
     var first = true;
     var iter = source_files.iterate();
-    while (try iter.next()) |entry| {
-        if (entry.kind != .File)
-            return error.InvalidFile;
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) return error.InvalidFile;
 
-        var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
+        const contents = try source_files.readFileAlloc(io, entry.name, arena.allocator(), .limited(1024));
+        const tree = try std.json.parseFromSlice(std.json.Value, arena.allocator(), contents, .{});
 
-        var contents = try source_files.readFileAlloc(&arena.allocator, entry.name, 1024);
-        defer arena.allocator.free(contents);
-
-        var parser = std.json.Parser.init(&arena.allocator, false);
-        defer parser.deinit();
-
-        var tree = try parser.parse(contents);
-        defer tree.deinit();
-
-        defer first = false;
-        if (!first) {
-            try writer.writeAll(",");
-        }
-
-        try tree.root.jsonStringify(.{}, writer);
+        if (!first) try writer.writeAll(",");
+        first = false;
+        try std.json.Stringify.value(tree.value, .{}, writer);
     }
     try writer.writeAll("]");
 
-    try std.fs.cwd().writeFile("website/users.json", string_buffer.items);
+    try cwd.writeFile(io, .{ .sub_path = "website/users.json", .data = buffer.written() });
 }
